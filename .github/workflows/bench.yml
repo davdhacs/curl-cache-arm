@@ -1,0 +1,97 @@
+name: bench
+# Arm A: classic actions/cache (curl's own CI caching pattern).
+# Mirrors one representative linux.yml job: mbedtls-latest dep build
+# (cached by actions/cache, version-keyed) + curl autotools build.
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'curl commit SHA to replay (default: HEAD~1)'
+        required: false
+        type: string
+
+permissions:
+  actions: write
+
+env:
+  MBEDTLS_VERSION: 4.3.0
+  MAKEFLAGS: -j 5
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Runner record + calibration probe
+        run: |
+          { date -u +%FT%TZ; grep -m1 'model name' /proc/cpuinfo; echo "nproc=$(nproc)"; } | tee runner.txt
+          curl -sSfLO https://sqlite.org/2024/sqlite-amalgamation-3450100.zip
+          unzip -q sqlite-amalgamation-3450100.zip
+          cd sqlite-amalgamation-3450100
+          for i in 1 2 3; do
+            rm -f sqlite3.o
+            S=$(date +%s%3N); gcc -O2 -c sqlite3.c; E=$(date +%s%3N)
+            echo "calib_ms=$((E-S))"
+          done | tee ../calib.txt
+
+      - name: Checkout curl at the target commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit || 'master~1' }}
+          fetch-depth: 0
+
+      - name: 'cache mbedtls (latest)'
+        id: cache-mbedtls
+        uses: actions/cache@v6
+        with:
+          path: ~/pkg/mbedtls
+          key: bench-${{ runner.os }}-mbedtls-${{ env.MBEDTLS_VERSION }}-${{ runner.arch }}
+
+      - name: 'build mbedtls (latest)'
+        if: steps.cache-mbedtls.outputs.cache-hit != 'true'
+        run: |
+          cd "$HOME"
+          T0=$(date +%s%3N)
+          curl --disable --fail --silent --show-error --connect-timeout 15 --max-time 120 --retry 6 --retry-connrefused \
+            --location --proto-redir =https "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${MBEDTLS_VERSION}/mbedtls-${MBEDTLS_VERSION}.tar.bz2" --output pkg.bin
+          sha256sum pkg.bin && tar -xjf pkg.bin && rm -f pkg.bin
+          cd "mbedtls-${MBEDTLS_VERSION}"
+          ./scripts/config.py set MBEDTLS_THREADING_C
+          ./scripts/config.py set MBEDTLS_THREADING_PTHREAD
+          cmake -B . -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX="$HOME"/pkg/mbedtls \
+            -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF
+          cmake --build .
+          cmake --install .
+          E=$(date +%s%3N)
+          echo "RESULT phase=dep_build ms=$((E-T0)) built=1"
+
+      - name: Record dep cache state
+        run: |
+          echo "RESULT phase=dep_cache hit=${{ steps.cache-mbedtls.outputs.cache-hit }}"
+
+      - name: Build curl (timed: autoreconf + configure + make)
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          T0=$(date +%s%3N)
+          autoreconf -fi
+          T1=$(date +%s%3N); echo "RESULT phase=autoreconf ms=$((T1-T0))"
+          mkdir bld && cd bld
+          ../configure --prefix="$HOME"/curl-install --enable-unity --enable-warnings --enable-werror --disable-static \
+            --disable-dependency-tracking --enable-option-checking=fatal \
+            --with-mbedtls="$HOME"/pkg/mbedtls --enable-debug
+          T2=$(date +%s%3N); echo "RESULT phase=configure ms=$((T2-T1))"
+          make V=1
+          T3=$(date +%s%3N); echo "RESULT phase=make ms=$((T3-T2))"
+          bld/src/curl --disable -V
+
+      - name: Verify curl binary
+        run: |
+          "$GITHUB_WORKSPACE"/bld/src/curl --disable -V | head -2
+          echo "RESULT phase=verify ok=1"
+
+      - name: Record cache usage
+        run: |
+          U=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/davdhacs/curl-cache-arm/actions/cache/usage")
+          printf 'RESULT quota_bytes=%s\n' "$(printf %s "$U" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("active_caches_size_in_bytes",""))')"
+          cat runner.txt calib.txt
