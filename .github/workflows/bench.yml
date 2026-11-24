@@ -40,6 +40,12 @@ jobs:
           ref: ${{ inputs.commit || 'master~1' }}
           fetch-depth: 0
 
+      - name: Install prereqs (curl's own package list)
+        run: |
+          sudo apt-get -o Dpkg::Use-Pty=0 update
+          sudo apt-get -o Dpkg::Use-Pty=0 install -y \
+            libtool autoconf automake pkgconf libpsl-dev zlib1g-dev libbrotli-dev libzstd-dev libnghttp2-dev
+
       - name: 'cache mbedtls (latest)'
         id: cache-mbedtls
         uses: actions/cache@v6
