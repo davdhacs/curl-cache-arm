@@ -69,7 +69,7 @@ jobs:
         run: |
           echo "RESULT phase=dep_cache hit=${{ steps.cache-mbedtls.outputs.cache-hit }}"
 
-      - name: Build curl (timed: autoreconf + configure + make)
+      - name: "Build curl (timed: autoreconf + configure + make)"
         run: |
           cd "$GITHUB_WORKSPACE"
           T0=$(date +%s%3N)
