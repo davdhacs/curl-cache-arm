@@ -24,7 +24,7 @@ jobs:
     steps:
       - name: Runner record + calibration probe
         run: |
-          { date -u +%FT%TZ; grep -m1 'model name' /proc/cpuinfo; echo "nproc=$(nproc)"; } | tee runner.txt
+          { date -u +%FT%TZ; grep -m1 'model name' /proc/cpuinfo; echo "nproc=$(nproc)"; } | tee "$RUNNER_TEMP/runner.txt"
           curl -sSfLO https://sqlite.org/2024/sqlite-amalgamation-3450100.zip
           unzip -q sqlite-amalgamation-3450100.zip
           cd sqlite-amalgamation-3450100
@@ -32,7 +32,7 @@ jobs:
             rm -f sqlite3.o
             S=$(date +%s%3N); gcc -O2 -c sqlite3.c; E=$(date +%s%3N)
             echo "calib_ms=$((E-S))"
-          done | tee ../calib.txt
+          done | tee "$RUNNER_TEMP/calib.txt"
 
       - name: Checkout curl at the target commit
         uses: actions/checkout@v4
@@ -76,6 +76,8 @@ jobs:
           echo "RESULT phase=dep_cache hit=${{ steps.cache-mbedtls.outputs.cache-hit }}"
 
       - name: "Build curl (timed: autoreconf + configure + make)"
+        env:
+          LDFLAGS: -Wl,-rpath,/home/runner/pkg/mbedtls/lib
         run: |
           cd "$GITHUB_WORKSPACE"
           T0=$(date +%s%3N)
@@ -88,7 +90,8 @@ jobs:
           T2=$(date +%s%3N); echo "RESULT phase=configure ms=$((T2-T1))"
           make V=1
           T3=$(date +%s%3N); echo "RESULT phase=make ms=$((T3-T2))"
-          bld/src/curl --disable -V
+          test -x bld/src/curl || { echo "FAIL: no binary"; ls bld/src/ | head; exit 1; }
+          bld/src/curl --disable -V || { ldd bld/src/curl || true; exit 1; }
 
       - name: Verify curl binary
         run: |
@@ -100,4 +103,4 @@ jobs:
           U=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
             "https://api.github.com/repos/davdhacs/curl-cache-arm/actions/cache/usage")
           printf 'RESULT quota_bytes=%s\n' "$(printf %s "$U" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("active_caches_size_in_bytes",""))')"
-          cat runner.txt calib.txt
+          cat "$RUNNER_TEMP/runner.txt" "$RUNNER_TEMP/calib.txt" 2>/dev/null || true
